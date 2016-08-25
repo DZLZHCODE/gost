@@ -1,112 +1,91 @@
 package main
 
 import (
-	"bufio"
-	//"bytes"
-	"errors"
-	"github.com/ginuerzh/gosocks5"
+	"crypto/tls"
+	"fmt"
+	"github.com/golang/glog"
 	"io"
-	"log"
 	"net"
-	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 )
 
-const (
-	MethodTLS uint8 = 0x80 + iota
-	MethodAES128
-	MethodAES192
-	MethodAES256
-	MethodDES
-	MethodBF
-	MethodCAST5
-	MethodRC4MD5
-	MethodRC4
-	MethodTable
-)
+type strSlice []string
 
-var Methods = map[uint8]string{
-	gosocks5.MethodNoAuth: "",            // 0x00
-	MethodTLS:             "tls",         // 0x80
-	MethodAES128:          "aes-128-cfb", // 0x81
-	MethodAES192:          "aes-192-cfb", // 0x82
-	MethodAES256:          "aes-256-cfb", // 0x83
-	MethodDES:             "des-cfb",     // 0x84
-	MethodBF:              "bf-cfb",      // 0x85
-	MethodCAST5:           "cast5-cfb",   // 0x86
-	MethodRC4MD5:          "rc4-md5",     // 8x87
-	MethodRC4:             "rc4",         // 0x88
-	MethodTable:           "table",       // 0x89
+func (ss *strSlice) String() string {
+	return fmt.Sprintf("%s", *ss)
+}
+func (ss *strSlice) Set(value string) error {
+	*ss = append(*ss, value)
+	return nil
 }
 
-func ToSocksAddr(addr net.Addr) *gosocks5.Addr {
-	host, port, _ := net.SplitHostPort(addr.String())
-	p, _ := strconv.Atoi(port)
-
-	return &gosocks5.Addr{
-		Type: gosocks5.AddrIPv4,
-		Host: host,
-		Port: uint16(p),
-	}
+// admin:123456@localhost:8080
+type Args struct {
+	Addr      string // host:port
+	Protocol  string // protocol: http&socks5/http/socks/socks5/ss, default is http&socks5
+	Transport string // transport: tcp/ws/tls, default is tcp(raw tcp)
+	User      *url.Userinfo
+	Cert      tls.Certificate // tls certificate
 }
 
-func Connect(addr, proxy string) (net.Conn, error) {
-	if !strings.Contains(addr, ":") {
-		addr += ":80"
+func (args Args) String() string {
+	var authUser, authPass string
+	if args.User != nil {
+		authUser = args.User.Username()
+		authPass, _ = args.User.Password()
 	}
-	if len(proxy) == 0 {
-		taddr, err := net.ResolveTCPAddr("tcp", addr)
-		if err != nil {
-			log.Println(err)
-			return nil, err
+	return fmt.Sprintf("host: %s, protocol: %s, transport: %s, auth: %s:%s",
+		args.Addr, args.Protocol, args.Transport, authUser, authPass)
+}
+
+func parseArgs(ss []string) (args []Args) {
+	for _, s := range ss {
+		if !strings.Contains(s, "://") {
+			s = "tcp://" + s
 		}
-		return net.DialTCP("tcp", nil, taddr)
+		u, err := url.Parse(s)
+		if err != nil {
+			glog.V(LWARNING).Infoln(err)
+			continue
+		}
+
+		arg := Args{
+			Addr: u.Host,
+			User: u.User,
+			Cert: tlsCert,
+		}
+
+		schemes := strings.Split(u.Scheme, "+")
+		if len(schemes) == 1 {
+			arg.Protocol = schemes[0]
+			arg.Transport = schemes[0]
+		}
+		if len(schemes) == 2 {
+			arg.Protocol = schemes[0]
+			arg.Transport = schemes[1]
+		}
+
+		switch arg.Protocol {
+		case "http", "socks", "socks5", "ss":
+		default:
+			arg.Protocol = "default"
+		}
+		switch arg.Transport {
+		case "ws", "wss", "tls", "tcp":
+		default:
+			arg.Transport = "tcp"
+		}
+
+		args = append(args, arg)
 	}
 
-	paddr, err := net.ResolveTCPAddr("tcp", proxy)
-	if err != nil {
-		return nil, err
-	}
-	pconn, err := net.DialTCP("tcp", nil, paddr)
-	if err != nil {
-		log.Println(err)
-		return nil, err
-	}
-
-	header := http.Header{}
-	header.Set("Proxy-Connection", "keep-alive")
-	req := &http.Request{
-		Method: "CONNECT",
-		URL:    &url.URL{Host: addr},
-		Host:   addr,
-		Header: header,
-	}
-	if err := req.Write(pconn); err != nil {
-		log.Println(err)
-		pconn.Close()
-		return nil, err
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(pconn), req)
-	if err != nil {
-		log.Println(err)
-		pconn.Close()
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		pconn.Close()
-		return nil, errors.New(resp.Status)
-	}
-
-	return pconn, nil
+	return
 }
 
 // based on io.Copy
 func Copy(dst io.Writer, src io.Reader) (written int64, err error) {
-	buf := lpool.Take()
-	defer lpool.put(buf)
+	buf := make([]byte, 32*1024)
 
 	for {
 		nr, er := src.Read(buf)
@@ -139,9 +118,9 @@ func Copy(dst io.Writer, src io.Reader) (written int64, err error) {
 	return
 }
 
-func Pipe(src io.Reader, dst io.Writer, c chan<- error) {
+func Pipe(src io.Reader, dst io.Writer, ch chan<- error) {
 	_, err := Copy(dst, src)
-	c <- err
+	ch <- err
 }
 
 func Transport(conn, conn2 net.Conn) (err error) {

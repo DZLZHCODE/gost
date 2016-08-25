@@ -3,57 +3,65 @@ package main
 
 import (
 	"flag"
-	//"github.com/ginuerzh/gosocks5"
-	"log"
-	"time"
+	"fmt"
+	"github.com/golang/glog"
+	"os"
+	"sync"
+)
+
+const (
+	LFATAL = iota
+	LERROR
+	LWARNING
+	LINFO
+	LDEBUG
+)
+
+const (
+	Version = "2.0-rc3"
 )
 
 var (
-	Laddr, Saddr, Proxy string
-	Websocket           bool
-	Shadows             bool
-	SMethod, SPassword  string
-	Method, Password    string
-	CertFile, KeyFile   string
+	listenAddr, forwardAddr strSlice
+	pv                      bool // print version
+
+	listenArgs  []Args
+	forwardArgs []Args
 )
 
 func init() {
-	printVersion()
-
-	flag.StringVar(&Proxy, "P", "", "proxy for forward")
-	flag.StringVar(&Saddr, "S", "", "the server that connecting to")
-	flag.StringVar(&Laddr, "L", ":8080", "listen address")
-	flag.StringVar(&Method, "m", "", "tunnel cipher method")
-	flag.StringVar(&Password, "p", "ginuerzh@gmail.com", "tunnel cipher password")
-	flag.StringVar(&CertFile, "cert", "", "cert file for tls")
-	flag.StringVar(&KeyFile, "key", "", "key file for tls")
-	flag.BoolVar(&Shadows, "ss", false, "run as shadowsocks server")
-	flag.BoolVar(&Websocket, "ws", false, "use websocket for tunnel")
-	flag.StringVar(&SMethod, "sm", "rc4-md5", "shadowsocks cipher method")
-	flag.StringVar(&SPassword, "sp", "ginuerzh@gmail.com", "shadowsocks cipher password")
+	flag.Var(&listenAddr, "L", "listen address, can listen on multiple ports")
+	flag.Var(&forwardAddr, "F", "forward address, can make a forward chain")
+	flag.BoolVar(&pv, "V", false, "print version")
 	flag.Parse()
-
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
 }
 
-var (
-	spool = NewMemPool(1024, 120*time.Minute, 1024)  // 1k size buffer pool
-	mpool = NewMemPool(16*1024, 60*time.Minute, 512) // 16k size buffer pool
-	lpool = NewMemPool(32*1024, 30*time.Minute, 256) // 32k size buffer pool
-)
-
 func main() {
-	//log.Fatal(gost.Run())
-	if len(Saddr) == 0 {
-		var server Server
-		if Websocket {
-			server = &WSServer{Addr: Laddr}
-		} else {
-			server = &Socks5Server{Addr: Laddr}
-		}
-		log.Fatal(server.ListenAndServe())
+	defer glog.Flush()
+
+	if flag.NFlag() == 0 {
+		flag.PrintDefaults()
+		return
+	}
+	if pv {
+		fmt.Fprintln(os.Stderr, "gost", Version)
 		return
 	}
 
-	log.Fatal(listenAndServe(Laddr, cliHandle))
+	listenArgs = parseArgs(listenAddr)
+	forwardArgs = parseArgs(forwardAddr)
+
+	if len(listenArgs) == 0 {
+		glog.Exitln("no listen addr")
+	}
+
+	var wg sync.WaitGroup
+	for _, args := range listenArgs {
+		wg.Add(1)
+		go func(arg Args) {
+			defer wg.Done()
+			listenAndServe(arg)
+		}(args)
+	}
+	wg.Wait()
 }
